@@ -89,6 +89,7 @@ static void rtsp_client_connected (GstRTSPServer *server, GstRTSPClient *client)
 
 static void rtsp_options_request (GstRTSPClient *client, GstRTSPContext *ctx, GstRTSPServer *server);
 static void rtsp_describe_request (GstRTSPClient *client, GstRTSPContext *ctx, GstRTSPServer *server);
+static GstRTSPStatusCode rtsp_predescribe_request (GstRTSPClient *client, GstRTSPContext *ctx, GstRTSPServer *server);
 static void rtsp_setup_request (GstRTSPClient *client, GstRTSPContext *ctx, GstRTSPServer *server);
 static void rtsp_play_request (GstRTSPClient *client, GstRTSPContext *ctx, GstRTSPServer *server);
 static void rtsp_pause_request (GstRTSPClient *client, GstRTSPContext *ctx, GstRTSPServer *server);
@@ -162,6 +163,7 @@ rtsp_client_connected (GstRTSPServer *server, GstRTSPClient *client)
   g_print ("rtmp2rtsp: client connected\n");
 
   g_signal_connect (client, "options-request", (GCallback) rtsp_options_request, server);
+  g_signal_connect (client, "pre-describe-request", (GCallback) rtsp_predescribe_request, server);
   g_signal_connect (client, "describe-request", (GCallback) rtsp_describe_request, server);
   g_signal_connect (client, "setup-request", (GCallback) rtsp_setup_request, server);
   g_signal_connect (client, "play-request", (GCallback) rtsp_play_request, server);
@@ -193,7 +195,7 @@ rtsp_options_request (GstRTSPClient *client, GstRTSPContext *ctx, GstRTSPServer 
 
     launch = g_strdup_printf (
         "( "
-        "rtmpsrc location=rtmp://%s:%s%s timeout=%u "
+        "rtmpsrc location=rtmp://%s:%s%s timeout=%u live=1 "
         "! flvdemux name=demux "
         "demux.video "
         "! queue "
@@ -223,6 +225,68 @@ rtsp_options_request (GstRTSPClient *client, GstRTSPContext *ctx, GstRTSPServer 
 
   g_object_unref (mp);
 }
+
+static GstRTSPStatusCode
+rtsp_predescribe_request (GstRTSPClient *client, GstRTSPContext *ctx, GstRTSPServer *server)
+{
+  GstRTSPUrl *uri = ctx->uri;
+
+  g_print ("rtmp2rtsp: %s: predescribe request\n", uri->abspath);
+
+  GstRTSPOpaque *opaque = g_object_get_data (G_OBJECT (server), "opaque");
+  GstRTSPMountPoints *mp;
+  GstRTSPMediaFactory *factory;
+
+  mp = gst_rtsp_server_get_mount_points (server);
+
+  factory = gst_rtsp_mount_points_match (mp, uri->abspath, NULL);
+
+  if (!factory)
+  {
+    gchar *launch;
+
+    factory = gst_rtsp_media_factory_new ();
+
+    g_object_set_data_full (G_OBJECT (factory), "uri", gst_rtsp_url_copy (uri), (GDestroyNotify) gst_rtsp_url_free);
+
+    launch = g_strdup_printf (
+        "( "
+        "rtmpsrc location=rtmp://%s:%s%s timeout=%u live=1 "
+        "! flvdemux name=demux "
+        "demux.video "
+        "! queue "
+        "! h264parse name=parse0 "
+        "! rtph264pay name=pay0 pt=96 "
+        "demux.audio "
+        "! queue "
+        "! aacparse name=parse1 "
+        "! rtpmp4gpay name=pay1 pt=97 "
+        ")",
+        opaque->rtmp_host, opaque->rtmp_port, uri->abspath, opaque->rtmp_timeout);
+
+    gst_rtsp_media_factory_set_launch (factory, launch);
+    gst_rtsp_media_factory_set_shared (factory, TRUE);
+    gst_rtsp_media_factory_set_eos_shutdown (factory, TRUE);
+
+    g_signal_connect (factory, "media-configure", (GCallback) rtsp_media_configure, server);
+
+    gst_rtsp_mount_points_add_factory (mp, uri->abspath, factory);
+
+    g_free (launch);
+  }
+  else
+  {
+    g_object_unref (factory);
+  }
+
+  g_object_unref (mp);
+  GstRTSPStatusCode sig_result=GST_RTSP_STS_OK;
+  return sig_result;
+}
+
+
+
+
 
 static void
 rtsp_describe_request (GstRTSPClient *client, GstRTSPContext *ctx, GstRTSPServer *server)
